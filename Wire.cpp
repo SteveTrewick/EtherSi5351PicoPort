@@ -28,7 +28,10 @@ void WireClass::beginTransmission(uint8_t address) {
 
 uint8_t WireClass::endTransmission() {
     int ret = i2c_write_blocking(i2cPort, txAddress, txBuffer, txLength, false);
-    return (ret < 0) ? 4 : 0; // 0 = success, 4 = error (like Arduino Wire)
+    if (ret < 0 || ret != txLength) {
+        return 4;
+    }
+    return 0; // 0 = success, 4 = error (like Arduino Wire)
 }
 
 void WireClass::write(uint8_t data) {

@@ -4,10 +4,10 @@
 #include "pico/stdlib.h"
 #include "pico/stdio_usb.h"
 
+#include "hardware/i2c.h"
 #include "si5351.h"
-#include "Wire.h"
 
-static Si5351 si5351;
+static Si5351 si5351(i2c0, SI5351_BUS_BASE_ADDR, true, 16, 17, 100000);
 
 static int32_t cal_factor = 0;
 static int32_t old_cal = 0;
