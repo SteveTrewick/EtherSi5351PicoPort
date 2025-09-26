@@ -7,7 +7,7 @@
 
 class WireClass {
 public:
-    WireClass(i2c_inst_t *i2cPort = i2c0, uint sdaPin = 21, uint sclPin = 22);
+    WireClass(i2c_inst_t *i2cPort = i2c0, uint sdaPin = 16, uint sclPin = 17);
 
     void begin(); // init with defaults
     void beginTransmission(uint8_t address);
