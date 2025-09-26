@@ -23,9 +23,11 @@
  */
 
 #include <stdint.h>
+#include <algorithm>
+#include <vector>
 
-#include "Arduino.h"
-#include "Wire.h"
+#include "hardware/gpio.h"
+#include "hardware/i2c.h"
 #include "si5351.h"
 
 
@@ -33,10 +35,16 @@
 /* Public functions */
 /********************/
 
-Si5351::Si5351(uint8_t i2c_addr):
-	i2c_bus_addr(i2c_addr)
+Si5351::Si5351(i2c_inst_t *i2c, uint8_t i2c_addr, bool manage_bus, uint sda,
+               uint scl, uint32_t i2c_baud):
+        i2c_port(i2c),
+        sda_pin(sda),
+        scl_pin(scl),
+        i2c_baudrate(i2c_baud),
+        manage_i2c_bus(manage_bus),
+        i2c_bus_addr(i2c_addr)
 {
-	xtal_freq[0] = SI5351_XTAL_FREQ;
+        xtal_freq[0] = SI5351_XTAL_FREQ;
 
 	// Start by using XO ref osc as default for each PLL
 	plla_ref_osc = SI5351_PLL_INPUT_XO;
@@ -62,50 +70,63 @@ Si5351::Si5351(uint8_t i2c_addr):
  */
 bool Si5351::init(uint8_t xtal_load_c, uint32_t xo_freq, int32_t corr)
 {
-	// Start I2C comms
-	Wire.begin();
+        if (i2c_port == nullptr)
+        {
+                return false;
+        }
 
-	// Check for a device on the bus, bail out if it is not there
-	Wire.beginTransmission(i2c_bus_addr);
-	uint8_t reg_val;
-  reg_val = Wire.endTransmission();
+        if (manage_i2c_bus)
+        {
+                i2c_init(i2c_port, i2c_baudrate);
+                gpio_set_function(sda_pin, GPIO_FUNC_I2C);
+                gpio_set_function(scl_pin, GPIO_FUNC_I2C);
+                gpio_pull_up(sda_pin);
+                gpio_pull_up(scl_pin);
+        }
 
-	if(reg_val == 0)
-	{
-		// Wait for SYS_INIT flag to be clear, indicating that device is ready
-		uint8_t status_reg = 0;
-		do
-		{
-			status_reg = si5351_read(SI5351_DEVICE_STATUS);
-		} while (status_reg >> 7 == 1);
+        uint8_t status_reg = 0;
+        uint8_t reg = SI5351_DEVICE_STATUS;
+        int ret = i2c_write_blocking(i2c_port, i2c_bus_addr, &reg, 1, true);
+        if (ret < 0 || ret != 1)
+        {
+                return false;
+        }
 
-		// Set crystal load capacitance
-		si5351_write(SI5351_CRYSTAL_LOAD, (xtal_load_c & SI5351_CRYSTAL_LOAD_MASK) | 0b00010010);
+        ret = i2c_read_blocking(i2c_port, i2c_bus_addr, &status_reg, 1, false);
+        if (ret < 0 || ret != 1)
+        {
+                return false;
+        }
 
-		// Set up the XO and CLKIN reference frequencies
-		if (xo_freq != 0)
-		{
-			set_ref_freq(xo_freq, SI5351_PLL_INPUT_XO);
-            set_ref_freq(xo_freq, SI5351_PLL_INPUT_CLKIN);          //Also CLKIN
-		}
-		else
-		{
-			set_ref_freq(SI5351_XTAL_FREQ, SI5351_PLL_INPUT_XO);
-            set_ref_freq(SI5351_XTAL_FREQ, SI5351_PLL_INPUT_CLKIN); //Also CLKIN
-		}
+        // Wait for SYS_INIT flag to be clear, indicating that device is ready
+        while (status_reg >> 7 == 1)
+        {
+                status_reg = si5351_read(SI5351_DEVICE_STATUS);
+        }
 
-		// Set the frequency calibrations for the XO and CLKIN
-		set_correction(corr, SI5351_PLL_INPUT_XO);
+        // Set crystal load capacitance
+        si5351_write(SI5351_CRYSTAL_LOAD,
+                     (xtal_load_c & SI5351_CRYSTAL_LOAD_MASK) | 0b00010010);
+
+        // Set up the XO and CLKIN reference frequencies
+        if (xo_freq != 0)
+        {
+                set_ref_freq(xo_freq, SI5351_PLL_INPUT_XO);
+                set_ref_freq(xo_freq, SI5351_PLL_INPUT_CLKIN);          //Also CLKIN
+        }
+        else
+        {
+                set_ref_freq(SI5351_XTAL_FREQ, SI5351_PLL_INPUT_XO);
+                set_ref_freq(SI5351_XTAL_FREQ, SI5351_PLL_INPUT_CLKIN); //Also CLKIN
+        }
+
+        // Set the frequency calibrations for the XO and CLKIN
+        set_correction(corr, SI5351_PLL_INPUT_XO);
         set_correction(corr, SI5351_PLL_INPUT_CLKIN);
 
-		reset();
+        reset();
 
-		return true;
-	}
-	else
-	{
-		return false;
-	}
+        return true;
 }
 
 /*
@@ -1312,40 +1333,68 @@ void Si5351::set_ref_freq(uint32_t ref_freq, enum si5351_pll_input ref_osc)
 
 uint8_t Si5351::si5351_write_bulk(uint8_t addr, uint8_t bytes, uint8_t *data)
 {
-	Wire.beginTransmission(i2c_bus_addr);
-	Wire.write(addr);
-	for(int i = 0; i < bytes; i++)
-	{
-		Wire.write(data[i]);
-	}
-	return Wire.endTransmission();
+        if (i2c_port == nullptr)
+        {
+                return 4;
+        }
 
+        std::vector<uint8_t> buffer(bytes + 1);
+        buffer[0] = addr;
+        if (bytes > 0 && data != nullptr)
+        {
+                std::copy(data, data + bytes, buffer.begin() + 1);
+        }
+
+        int ret = i2c_write_blocking(i2c_port, i2c_bus_addr, buffer.data(),
+                                     buffer.size(), false);
+
+        if (ret < 0 || ret != static_cast<int>(buffer.size()))
+        {
+                return 4;
+        }
+
+        return 0;
 }
 
 uint8_t Si5351::si5351_write(uint8_t addr, uint8_t data)
 {
-	Wire.beginTransmission(i2c_bus_addr);
-	Wire.write(addr);
-	Wire.write(data);
-	return Wire.endTransmission();
+        if (i2c_port == nullptr)
+        {
+                return 4;
+        }
+
+        uint8_t buffer[2] = {addr, data};
+        int ret = i2c_write_blocking(i2c_port, i2c_bus_addr, buffer, 2, false);
+
+        if (ret < 0 || ret != 2)
+        {
+                return 4;
+        }
+
+        return 0;
 }
 
 uint8_t Si5351::si5351_read(uint8_t addr)
 {
-	uint8_t reg_val = 0;
+        if (i2c_port == nullptr)
+        {
+                return 0;
+        }
 
-	Wire.beginTransmission(i2c_bus_addr);
-	Wire.write(addr);
-	Wire.endTransmission();
+        uint8_t reg_val = 0;
+        int ret = i2c_write_blocking(i2c_port, i2c_bus_addr, &addr, 1, true);
+        if (ret < 0 || ret != 1)
+        {
+                return 0;
+        }
 
-	Wire.requestFrom(i2c_bus_addr, (uint8_t)1);
+        ret = i2c_read_blocking(i2c_port, i2c_bus_addr, &reg_val, 1, false);
+        if (ret < 0 || ret != 1)
+        {
+                return 0;
+        }
 
-	while(Wire.available())
-	{
-		reg_val = Wire.read();
-	}
-
-	return reg_val;
+        return reg_val;
 }
 
 /*********************/
